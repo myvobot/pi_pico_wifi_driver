@@ -43,6 +43,27 @@ CMDS_IP = {
     'PING': b'AT+PING'
 }
 
+# HTTP Client related AT commands
+CMDS_HTTP = {
+    'HTTP_CLIENT': b'AT+HTTPCLIENT'
+}
+
+HTTP_METHODS = {
+    "HEAD": 1,
+    "GET": 2,
+    "POST": 3,
+    "PUT": 4,
+    "DELETE": 5,
+}
+
+# data type of HTTP client request.
+CONTENT_TYPES = {
+    "application/x-www-form-urlencoded": 0,
+    "application/json": 1,
+    "multipart/form-data": 2,
+    "text/xml": 3,
+}
+
 # WIFI network modes the ESPCHIP knows to handle
 WIFI_MODES = {
     'STATION': 1,
@@ -75,6 +96,8 @@ class CommandFailure(Exception):
 class UnknownWIFIModeError(Exception):
     pass
 
+class InvalidParameterError(Exception):
+    pass
 
 class ESPCHIP(object):
 
@@ -208,7 +231,7 @@ class ESPCHIP(object):
                 str_args.append(arg.decode())
             elif type(arg) is bool:
                 str_args.append(str(int(arg)))
-            else:
+            elif arg is not None:
                 str_args.append(str(arg))
         if debug:
             print(str_args)
@@ -523,3 +546,58 @@ class ESPCHIP(object):
     def ping(self, destination, debug=False):
         """Ping the destination address or hostname."""
         return self._set_command(CMDS_IP['PING'], destination, debug=debug)
+
+    def http_request(self, url, data=None, headers=[], method="GET", contentType="application/x-www-form-urlencoded", debug=False):
+        """Connect to a webpage URL and download html content.
+        """
+        if method not in HTTP_METHODS:
+            raise InvalidParameterError('Unknown http method')
+        if contentType not in CONTENT_TYPES:
+            raise InvalidParameterError('Unknown content Type')
+
+        try:
+            proto, dummy, host, path = url.split("/", 3)
+        except ValueError:
+            proto, dummy, host = url.split("/", 2)
+            path = ""
+        path = "/" + path
+        if proto == "http:":
+            transportType = 1 # HTTP_TRANSPORT_OVER_TCP
+            port = 80
+        elif proto == "https:":
+            transportType = 2 # HTTP_TRANSPORT_OVER_SSL
+            port = 443
+        else:
+            raise InvalidParameterError("Unsupported protocol: " + proto)
+
+        if ":" in host:
+            host, port = host.split(":", 1)
+            port = int(port)
+
+        res = self._set_command(CMDS_HTTP['HTTP_CLIENT'],
+                        HTTP_METHODS[method],
+                        CONTENT_TYPES[contentType],
+                        url,
+                        host,
+                        path,
+                        transportType,
+                        data,
+                        # TODO: multiple headers
+                        debug=debug)
+        # print(res)
+        l = 0
+        rdata = b''
+        magic = b'+' + CMDS_HTTP['HTTP_CLIENT'][3:] + b':'
+        if res and len(res):
+            for line in res:
+                if line.startswith(magic):
+                    x = line.split(magic)
+                    if len(x) > 1:
+                        _pos = x[1].find(b',')
+                        l += int(x[1][0 : _pos])
+                        rdata += x[1][_pos+1:]
+                else:
+                    rdata += line
+                    if len(rdata) > l:
+                        rdata = rdata[:l] # ignore the last \r\n
+        return {"size": l, "data": rdata }
