@@ -106,6 +106,9 @@ class ConnectionClosedError(Exception):
 class ListenTimeout(Exception):
     pass
 
+class AlreadyConnectedError(Exception):
+    pass
+
 class ESPCHIP(object):
 
     def __init__(self, uart=1, baud_rate=115200):
@@ -187,6 +190,8 @@ class ESPCHIP(object):
         # handle output of AT command
         if len(cmd_output) > 0:
             if cmd_output[-1].rstrip() == b'ERROR':
+                if b'ALREADY CONNECTED\r\n' in cmd_output:
+                    raise AlreadyConnectedError('Connection already connected')
                 raise CommandError('Command error!')
             elif cmd_output[-1].rstrip() == b'OK':
                 okay = True
