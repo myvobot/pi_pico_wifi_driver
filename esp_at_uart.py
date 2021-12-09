@@ -1,5 +1,6 @@
 from machine import UART
 import utime as time
+import struct
 
 # This hashmap collects all generic AT commands
 CMDS_GENERIC = {
@@ -99,6 +100,12 @@ class UnknownWIFIModeError(Exception):
 class InvalidParameterError(Exception):
     pass
 
+class ConnectionClosedError(Exception):
+    pass
+
+class ListenTimeout(Exception):
+    pass
+
 class ESPCHIP(object):
 
     def __init__(self, uart=1, baud_rate=115200):
@@ -109,7 +116,7 @@ class ESPCHIP(object):
             if type(uart) is int:
                 # self.uart = UART(uart, baud_rate)
                 from uart_timeout_any import uartTimeOut
-                self.uart = uartTimeOut(uart, baud_rate)
+                self.uart = uartTimeOut(uart, baud_rate, rxbuf=2048)
             elif type(uart) is UART:
                 self.uart = uart
             else:
@@ -211,6 +218,67 @@ class ESPCHIP(object):
                 print("%8i - RX-Timeout occured and no 'OK' received!" %
                       (time.ticks_diff(time.ticks_ms(), start)))
         return cmd_output
+
+    def receive_connection_data(self, timeout=0, debug=False):
+        """Receive connection data from an established connection, returning the binary data.
+        Raises ListenTimeout if no data were received within a timeout.
+        It is safe to retry the operation to wait longer.
+        Raises CommandFailure if unexpected data were received (probably protocol error or implementation bug).
+        The UART connection may be left in an invalid state."""
+        if debug:
+            start = time.ticks_ms()
+                
+        rx_prelude = self._receive_wait_for_string(b'+IPD', timeout=timeout, debug=debug)
+        rx_tag = self._receive_wait_for_string(b',', timeout=timeout, debug=debug)
+        rx_len = self._receive_wait_for_string(b':', timeout=timeout, debug=debug)
+        if debug:
+            print("%8i - RX: %s:" %
+                  (time.ticks_diff(time.ticks_ms(), start), rx_prelude + b'+' + rx_tag + b',' + rx_len + b':'))
+        rx_data = self._receive_bytes(int(rx_len), timeout=timeout, debug=debug)
+        if debug:
+            print("%8i - RX: %s:" %
+                  (time.ticks_diff(time.ticks_ms(), start), rx_data))
+        return rx_data
+
+    def _receive_wait_for_string(self, expexted_string, timeout=0, debug=False):
+        rx_data = b''
+        start = time.ticks_ms()
+        while True:
+            if timeout != 0 and time.ticks_ms()-start > timeout:
+                if len(rx_data) == 0:
+                    # No data has been received, therefore this is probably harmless timeout
+                    # (server have not sent any data yet)
+                    # Therefore raising a special exception for the clients to be able to recognize this and re-try
+                    raise ListenTimeout()
+                else:
+                    # Probably an protocol error.
+                    raise CommandFailure('Data receive timeout, data so far: '+str(rx_data))
+            if self.uart.any():
+                rx_char = self.uart.read(1)
+                rx_data += rx_char
+                if rx_data.endswith(expexted_string):
+                    return rx_data[:-len(expexted_string)]
+                if rx_data.endswith('CLOSED'):
+                    raise ConnectionClosedError('Connection closed by peer')
+            else:
+                time.sleep_ms(10)
+
+    def _receive_bytes(self, len, timeout=0, debug=False):
+        rx_data = b''
+        rx_count = 0
+        start = time.ticks_ms()
+        while True:
+            if timeout != 0 and time.ticks_ms()-start > timeout:
+                raise CommandFailure('Data receive timout, length expected '+str(len)+', got '+str(rx_count)+', data so far: '+str(rx_data))
+            if self.uart.any():
+                rx_char = self.uart.read(1)
+                rx_data += rx_char
+                rx_count += 1
+                if rx_count == len:
+                    return rx_data
+            else:
+                time.sleep_ms(10)
+
 
     @classmethod
     def _join_args(cls, *args, debug=False):
@@ -540,8 +608,14 @@ class ESPCHIP(object):
     def send(self, data, debug=False):
         """Send data over the current connection."""
         self._set_command(CMDS_IP['SEND'], len(data), debug=debug)
-        print(b'>' + data)
+        print('TX: ', str(data))
         self.uart.write(data)
+
+    def close_connection(self, debug=False):
+        """Close a TCP or UDP connection.
+        ToDo: Implement MUX mode. Currently only single connection mode is
+        supported!"""
+        self._execute_command(CMDS_IP['CLOSE'], debug=debug)
 
     def ping(self, destination, debug=False):
         """Ping the destination address or hostname."""
